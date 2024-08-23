@@ -1,0 +1,8 @@
+TODO
+*.swp
+tags
+.vscode
+.idea
+test*
+obj_dir
+my_test/
