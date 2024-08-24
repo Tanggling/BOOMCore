@@ -1,13 +1,13 @@
 # BOOMCore设计报告
 
 <div align="right">
-北京航空航天大学 2 队 - BOOM 
+北京航空航天大学BOOM团队 
 </div>
 <div align="right">
 唐凌、卞卓航、汤睿璟、曾华旭
 </div>
 设计概述：
-BOOM团队提交的处理器核心BOOMCore是一个级的乱序双发处理器，可以启动分支预测器和L1-Cache。⽀持 LoongArch32R指令集中除浮点指令外的全部功能，使⽤SystemVerilog硬件描述语⾔实现。
+BOOM团队提交的处理器核心BOOMCore是一个13级的乱序双发处理器，可以启动分支预测器和L1-Cache。⽀持 LoongArch32R指令集中除浮点指令外的全部功能，使⽤SystemVerilog硬件描述语⾔实现。
 
 ## 目录
 - 一、CPU 内核设计
