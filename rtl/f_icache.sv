@@ -1,11 +1,16 @@
 `include "a_defines.svh"
 
+/* TODO 将icache设置成可配置 */
+`define CACHE_MASK 32'hffffffc0
+
 module icache #(
     // Cache 规格设置
-    parameter int unsigned WAY_NUM = 2,
-    parameter int unsigned WORD_SIZE = 64,
-    parameter int unsigned DATA_DEPTH = 128,
-    parameter int unsigned BLOCK_SIZE = 4 * 64, //8个字 ，或者理解为 4 个长字
+    parameter int unsigned WAY_NUM = 2, // DON'T FIX
+    parameter int unsigned WORD_SIZE = 64, // DON'T FIX
+    parameter int unsigned CACHE_BLOCK_LEN = 16,
+    parameter int unsigned DATA_DEPTH = 1024 / CACHE_BLOCK_LEN, // DON'T FIX
+    parameter int unsigned BLOCK_SIZE = CACHE_BLOCK_LEN * 32, // DON'T FIX
+    parameter int unsigned BLOCK_DEPTH = $clog2(CACHE_BLOCK_LEN),
     parameter int unsigned TAG_ADDR_LOW = 12 - $clog2(DATA_DEPTH),
     parameter int unsigned DATA_ADDR_LOW = $clog2(WORD_SIZE / 8)
 ) (
@@ -40,33 +45,27 @@ commit_fetch_req_t   commit_cache_req;
 // fetch_commit_resp_t  cache_commit_resp;
 
 logic stall, stall_q;
-always_ff @(posedge clk) begin
-    if (!rst_n) begin
-        stall_q <= '0;
-    end else begin
-        stall_q <= stall;
-    end
-end
 logic cacop_stall, cacop_stall_q;
-always_ff @(posedge clk) begin
-    if (!rst_n) begin
-        cacop_stall_q <= '0;
-    end else begin
-        cacop_stall_q <= cacop_stall;
-    end
-end
 
 assign commit_resp_ready_o = !stall_q & !stall;
 // 打一拍整理数据
+always_ff @(posedge clk) begin
+    if (!rst_n) begin
+        cacop_stall_q <= '0;
+        stall_q <= '0;
+    end else begin
+        cacop_stall_q <= cacop_stall;
+        stall_q <= stall;
+    end
+end
+
 
 // stall逻辑，重填和维护都阻塞，阻塞时注意要
 b_f_pkg_t b_f_pkg, b_f_pkg_q;
 logic [31:0] pc;
-// logic [1 :0] mask; /* 2024/07/24 fix */
 
 assign b_f_pkg = fetch_icache_receiver.data;
-assign pc      = b_f_pkg.pc & 32'hfffffff8; //对齐
-// assign mask    = b_f_pkg.mask;
+assign pc      = b_f_pkg.pc & 32'hfffffff8; //两字对齐
 
 // MMU
 wire [1:0] mem_type = `_MEM_FETCH;
@@ -79,40 +78,24 @@ mmu #(
     .clk(clk),
     .rst_n(rst_n),
     .flush(flush_i),
-    .va(pc/*改成PC*/),
+    .va(pc),
     .csr(csr_i),
-    .mmu_mem_type(mem_type), // icache中，取指
+    .mmu_mem_type(mem_type), 
     .tlb_write_req_i(tlb_write_req_i),
     .trans_result_o(trans_result),
     .tlb_exception_o(tlb_exception)
 );
-// MMU
-// trans_result_t trans_result_c;
-// tlb_exception_t tlb_exception_c;
-// mmu #(
-//     .TLB_ENTRY_NUM(`_TLB_ENTRY_NUM),
-//     .TLB_SWITCH_OFF(0)
-// ) mmu_commit (
-//     .clk(clk),
-//     .rst_n(rst_n),
-//     .flush(flush_i),
-//     .va(commit_cache_req.addr),
-//     .csr(csr_i),
-//     .mmu_mem_type(mem_type), // icache中，取指
-//     .tlb_write_req_i(tlb_write_req_i),
-//     .trans_result_o(trans_result_c),
-//     .tlb_exception_o(tlb_exception_c)
-// );
 
 logic [31 : 0] paddr; // 假设从mmu打一拍传来的paddr
 logic [19 : 0] ppn;
 logic [31 : 0] paddr_q;
 logic          uncache;
+logic back_ready_q;
+
 assign paddr   = trans_result.pa;
 assign ppn     = paddr[31:12];
 assign uncache = !trans_result.mat[0];
 
-logic back_ready_q;
 always_ff @(posedge clk) begin
     if (!rst_n) begin
         back_ready_q <= '0;
@@ -134,9 +117,6 @@ always_ff @(posedge clk) begin
         tlb_exception_q <= tlb_exception_q;
     end
 end
-
-
-
 
 // 写入信息
 logic [31:0] refill_addr, refill_addr_q;
@@ -314,8 +294,8 @@ typedef enum logic [4:0] {
 } fsm_state;
 
 fsm_state fsm_cur, fsm_next;
-logic [4:0] req_num, req_ptr, req_num_q, req_ptr_q; 
-logic [1:0][31:0] temp_data_block, temp_data_block_q;
+logic [4 :0] req_num, req_ptr, req_num_q, req_ptr_q; 
+logic [1 :0][31:0] temp_data_block, temp_data_block_q;
 logic [DATA_DEPTH - 1:0]  refill_way, refill_way_q; 
 
 always_ff @(posedge clk) begin
@@ -427,16 +407,11 @@ always_comb begin
             end else if (!(|tag_hit)  | (b_f_pkg_q.mask == '0)) begin
                 stall |= '1; // 阻塞
                 fsm_next = F_MISS;
-                req_num  = 8;
+                req_num  = CACHE_BLOCK_LEN;
                 req_ptr  = 0;
                 // TODO 请求地址和valid_o
-                addr_o    = paddr & 32'hffffffe0; // 块对齐，一个块8个字
-                // addr_valid_o = '1;
-                data_len_o   = {3'b0, req_num[4:0]};
-                // if (axi_resp_ready_i) begin
-                //     fsm_next = F_MISS_S;
-                //     temp_data_block = '0;
-                // end
+                addr_o    = paddr & `CACHE_MASK; // 块对齐
+                data_len_o   = req_num[7 : 0]; // {3'b0, req_num[4:0]};
             end else if (!icache_decoder_sender.ready) begin
                 fsm_next = F_STALL;
                 stall    = '1;
@@ -449,7 +424,7 @@ always_comb begin
                 fsm_next = F_UNCACHE_S;
                 // req_ptr  = '0;
                 temp_data_block = '0;
-                // TODO 关闭请求
+                // 关闭请求
             end
         end
         F_UNCACHE_S:begin
@@ -477,9 +452,8 @@ always_comb begin
             addr_valid_o = '1;
             if (axi_resp_ready_i) begin
                 fsm_next = F_MISS_S;
-                req_ptr  = '0;
                 temp_data_block = '0;
-                // TODO 关闭请求
+                // 关闭请求
             end
         end
         F_MISS_S:begin
@@ -494,22 +468,22 @@ always_comb begin
                     fsm_next = F_NORMAL;
                 end
                 // refill对应位改路
-                refill_way[paddr_q[11:5]] = !refill_way_q[paddr_q[11:5]];       
+                refill_way[paddr_q[11:TAG_ADDR_LOW]] = !refill_way_q[paddr_q[11:TAG_ADDR_LOW]];       
             end
             // 等待数据,axi_data_i
             else if (axi_data_valid_i) begin
-                // TODO data in
+                // data in
                 temp_data_block[req_ptr_q[0]] = axi_data_i;
-                // refill TODO
-                req_ptr = req_ptr_q + 1;
-                if (!req_ptr[0] && (req_ptr[3:1] == (b_f_pkg_q.pc[5:3] & 3'b011) + 'd1)) begin
+                // refill
+                req_ptr = req_ptr_q + 'd1;
+                if (req_ptr_q[0] && (req_ptr_q[BLOCK_DEPTH:1] == (b_f_pkg_q.pc[2+BLOCK_DEPTH:3] & 4'b0111))) begin
                     insts = temp_data_block;
                 end
-                if (!req_ptr[0]) begin
-                    // TODO 写入
-                    refill_addr      =  (paddr_q & 32'hffffffe0) | ((req_ptr - 'd2) << 2);
+                if (req_ptr_q[0]) begin
+                    // 写入
+                    refill_addr      =  (paddr_q & `CACHE_MASK) | (({req_ptr_q[31:1],1'b0}) << 2);
                     refill_data      =  temp_data_block;
-                    refill_we        =  refill_way[paddr_q[11:5]] ? 2'b10 : 2'b01;
+                    refill_we        =  refill_way[paddr_q[11:TAG_ADDR_LOW]] ? 2'b10 : 2'b01;
                     refill_tag.tag   =  paddr_q[31:12];
                     refill_tag.d     =  '0;
                     refill_tag.v     =  '1;
@@ -517,7 +491,7 @@ always_comb begin
                 end
             end
         end
-        F_CACOP: begin
+        // F_CACOP: begin
             // fsm_next = F_NORMAL;
             // commit_resp_valid_o  = '1;
             // // if (cache_commit_resp.tlb_exception.ecode != '0) begin
@@ -535,7 +509,7 @@ always_comb begin
             //     icache_cacop_flush_o                   = 2'b10;
             //     cacop_stall                            = '0;
             // end
-        end
+        // end
         F_STALL: begin
             if (!icache_decoder_sender.ready) begin
                 fsm_next = F_STALL;
